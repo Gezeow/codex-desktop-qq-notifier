@@ -3,6 +3,8 @@ dist
 .DS_Store
 coverage
 runtime
+!packaging/windows/runtime/
+!packaging/windows/runtime/**
 artifacts
 packaging/windows/stage
 packaging/windows/output
