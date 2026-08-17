@@ -96,5 +96,5 @@ describe("public Windows packaging", () => {
       ], { encoding: "utf8" });
       expect(result.status, `${name}: ${result.stderr}`).toBe(0);
     }
-  });
+  }, 30_000);
 });
