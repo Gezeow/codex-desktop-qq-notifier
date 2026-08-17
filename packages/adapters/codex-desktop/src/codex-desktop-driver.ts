@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type CodexControlState,
   DesktopDriverError,
@@ -13,6 +13,7 @@ import {
   TurnEventType,
   type TurnEventPayload
 } from "../../../domain/src/message.js";
+import { hashIdentifierForLog } from "../../../domain/src/log-redaction.js";
 import type {
   ConversationRunOptions,
   DesktopDriverPort
@@ -51,6 +52,24 @@ type AssistantReplySnapshot = {
   reply: string | null;
   mediaReferences: string[];
   isStreaming: boolean;
+};
+
+export type DesktopCompletionSnapshot = {
+  threadId: string;
+  turnId: string | null;
+  responseId: string | null;
+  responseText: string | null;
+  responseHash: string;
+  title: string | null;
+  projectName: string | null;
+  isRunning: boolean;
+  isTopLevel: boolean;
+  observedAt: string;
+};
+
+export type DesktopCompletionPoll = {
+  active: DesktopCompletionSnapshot | null;
+  topLevelThreadIds: string[];
 };
 
 type ConversationViewportFingerprint = {
@@ -156,6 +175,62 @@ export class CodexDesktopDriver implements DesktopDriverPort {
     )) as string | null | undefined;
 
     return quotaSummary ?? null;
+  }
+
+  async readCompletionPoll(): Promise<DesktopCompletionPoll> {
+    const targets = await this.cdp.listTargets();
+    const pageTarget = targets.find(
+      (target) => target.type === "page" && target.url === "app://-/index.html"
+    ) ?? targets.find((target) => target.type === "page");
+    if (!pageTarget) {
+      throw new DesktopDriverError(
+        "Codex desktop app is not exposing any inspectable page target",
+        "session_not_found"
+      );
+    }
+    const metadata = (await this.cdp.evaluateOnPage(
+      this.buildCompletionMetadataProbeScript(),
+      pageTarget.id
+    )) as {
+      threadId?: string | null;
+      title?: string | null;
+      projectName?: string | null;
+      isTopLevel?: boolean;
+      topLevelThreadIds?: unknown;
+    } | null;
+    const topLevelThreadIds = Array.isArray(metadata?.topLevelThreadIds)
+      ? metadata.topLevelThreadIds.filter(
+          (value): value is string => typeof value === "string" && value.trim().length > 0
+        )
+      : [];
+    const threadId = metadata?.threadId?.trim() || null;
+    if (!threadId) {
+      return { active: null, topLevelThreadIds };
+    }
+
+    const reply = await this.readLatestAssistantSnapshot(pageTarget.id);
+    const responseText = reply.reply?.trim() || null;
+    const responseId = reply.unitKey;
+    const responseSeparator = responseId?.lastIndexOf(":") ?? -1;
+    const turnId = responseId && responseSeparator > 0
+      ? responseId.slice(0, responseSeparator) || null
+      : null;
+
+    return {
+      active: {
+        threadId,
+        turnId,
+        responseId,
+        responseText,
+        responseHash: createHash("sha256").update(responseText ?? "").digest("hex"),
+        title: metadata?.title?.trim() || null,
+        projectName: metadata?.projectName?.trim() || null,
+        isRunning: reply.isStreaming,
+        isTopLevel: metadata?.isTopLevel === true,
+        observedAt: new Date().toISOString()
+      },
+      topLevelThreadIds
+    };
   }
 
   async switchModel(model: string): Promise<CodexControlState> {
@@ -371,7 +446,7 @@ export class CodexDesktopDriver implements DesktopDriverPort {
     }
 
     console.warn("[qq-codex-bridge] codex composer submit not yet confirmed", {
-      sessionKey: binding.sessionKey,
+      sessionKeyHash: hashIdentifierForLog(binding.sessionKey),
       messageId: message.messageId,
       targetId,
       initialResult: result ?? null,
@@ -413,7 +488,7 @@ export class CodexDesktopDriver implements DesktopDriverPort {
     this.pendingReplyBaselines.delete(binding.sessionKey);
     this.pendingLocalRolloutCursors.delete(binding.sessionKey);
     console.error("[qq-codex-bridge] codex composer submit failed", {
-      sessionKey: binding.sessionKey,
+      sessionKeyHash: hashIdentifierForLog(binding.sessionKey),
       messageId: message.messageId,
       targetId,
       initialResult: result ?? null,
@@ -2281,11 +2356,110 @@ export class CodexDesktopDriver implements DesktopDriverPort {
     `;
   }
 
+  private buildCompletionMetadataProbeScript(): string {
+    return `(async () => {
+      const activeRow = Array.from(
+        document.querySelectorAll('[data-app-action-sidebar-thread-row]')
+      ).find((node) =>
+        node instanceof HTMLElement
+        && (
+          node.getAttribute('data-app-action-sidebar-thread-active') === 'true'
+          || node.getAttribute('data-app-action-sidebar-thread-selected') === 'true'
+        )
+      );
+      const conversationId = document
+        .querySelector('[data-above-composer-conversation-id]')
+        ?.getAttribute('data-above-composer-conversation-id')
+        ?.trim() || null;
+      const activeThreadAttribute = activeRow instanceof HTMLElement
+        ? activeRow.getAttribute('data-app-action-sidebar-thread-id')
+        : null;
+      const normalizeThreadId = (value) => {
+        if (typeof value !== 'string' || !value.trim()) {
+          return null;
+        }
+        const normalized = value.trim();
+        const separator = normalized.indexOf(':');
+        return separator >= 0 ? normalized.slice(separator + 1) : normalized;
+      };
+      const activeThreadId = normalizeThreadId(activeThreadAttribute);
+      const threadId = conversationId || (
+        activeThreadId && !activeThreadId.startsWith('client-new-thread:')
+          ? activeThreadId
+          : null
+      );
+      const title = activeRow instanceof HTMLElement
+        ? activeRow.getAttribute('data-app-action-sidebar-thread-title')
+          || activeRow.getAttribute('aria-label')
+          || activeRow.textContent
+        : null;
+      let projectName = null;
+      const ids = new Set(
+        Array.from(document.querySelectorAll('[data-app-action-sidebar-thread-row]'))
+          .map((node) => normalizeThreadId(
+            node instanceof HTMLElement
+              ? node.getAttribute('data-app-action-sidebar-thread-id')
+              : null
+          ))
+          .filter((value) => value && !value.startsWith('client-new-thread:'))
+      );
+      try {
+        const bootstrap = await window.electronBridge?.getInitialSidebarBootstrap?.();
+        const entries = Array.isArray(bootstrap?.catalogEntries)
+          ? bootstrap.catalogEntries
+          : [];
+        for (const entry of entries) {
+          if (typeof entry?.threadId === 'string' && entry.threadId.trim()) {
+            ids.add(entry.threadId.trim());
+          }
+        }
+        const current = entries.find((entry) => entry?.threadId === threadId);
+        if (typeof current?.cwd === 'string' && current.cwd.trim()) {
+          projectName = current.cwd.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) || null;
+        }
+      } catch {
+        // Sidebar bootstrap is optional; the active DOM identity remains authoritative.
+      }
+      if (threadId) {
+        ids.add(threadId);
+      }
+      const hostId = activeRow instanceof HTMLElement
+        ? activeRow.getAttribute('data-app-action-sidebar-thread-host-id')
+        : null;
+      const kind = activeRow instanceof HTMLElement
+        ? activeRow.getAttribute('data-app-action-sidebar-thread-kind')
+        : null;
+      return {
+        threadId,
+        title: typeof title === 'string' ? title.trim() || null : null,
+        projectName,
+        isTopLevel: Boolean(activeRow) && hostId === 'local' && kind === 'local',
+        topLevelThreadIds: Array.from(ids)
+      };
+    })()`;
+  }
+
   private buildAssistantReplyProbeScript(): string {
     return `(() => {
       const allAssistantUnits = Array.from(
-        document.querySelectorAll('[data-content-search-unit-key$=":assistant"]')
-      );
+        document.querySelectorAll('[data-content-search-unit-key]')
+      ).filter((node) => {
+        if (!(node instanceof HTMLElement)) {
+          return false;
+        }
+        if (
+          node.hasAttribute('data-local-conversation-user-anchor')
+          || node.hasAttribute('data-local-conversation-item-target-ids')
+        ) {
+          return false;
+        }
+        const unitKey = node.getAttribute('data-content-search-unit-key') || '';
+        return unitKey.endsWith(':assistant')
+          || (
+            /:msg_[a-zA-Z0-9_-]+$/.test(unitKey)
+            && node.querySelector('[class*="_markdownContent_"], [class*="_MarkdownRoot_"]') instanceof HTMLElement
+          );
+      });
       const composer = document.querySelector(
         '[data-codex-composer="true"], textarea, input[type="text"], [contenteditable="true"], [role="textbox"]'
       );
@@ -2574,7 +2748,9 @@ export class CodexDesktopDriver implements DesktopDriverPort {
       const hasAssistantActivity = assistantStatusMatcher.test(assistantStatusText)
         || assistantStatusMatcher.test(latestAssistantUnit.innerText || '');
 
-      const richContent = latestAssistantUnit.querySelector('[class*="_markdownContent_"]');
+      const richContent = latestAssistantUnit.querySelector(
+        '[class*="_markdownContent_"], [class*="_MarkdownRoot_"]'
+      );
       if (richContent instanceof HTMLElement) {
         const text = serializeRichContent(richContent);
         if (text) {

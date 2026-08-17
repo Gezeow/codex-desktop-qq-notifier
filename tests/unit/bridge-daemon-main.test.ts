@@ -1,6 +1,13 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { InboundMessage, TurnEvent } from "../../packages/domain/src/message.js";
-import { createIngressMessageHandler, resolveTurnEventOrchestrator } from "../../apps/bridge-daemon/src/main.js";
+import { hashIdentifierForLog } from "../../packages/domain/src/log-redaction.js";
+import {
+  buildBridgeHealthStatus,
+  createIngressMessageHandler,
+  resolveTurnEventOrchestrator
+} from "../../apps/bridge-daemon/src/main.js";
 
 function createMessage(overrides: Partial<InboundMessage> = {}): InboundMessage {
   return {
@@ -60,7 +67,7 @@ describe("bridge daemon main", () => {
       "[qq-codex-bridge] message handling failed",
       expect.objectContaining({
         messageId: "msg-main-1",
-        sessionKey: "qqbot:default::qq:c2c:abc-123",
+        sessionKeyHash: hashIdentifierForLog("qqbot:default::qq:c2c:abc-123"),
         error: "Codex desktop reply did not arrive before timeout"
       })
     );
@@ -114,5 +121,67 @@ describe("bridge daemon main", () => {
     });
 
     expect(resolved).toBe(qqShop);
+  });
+
+  it("marks aggregate QQ health false until every account is connected and authenticated", () => {
+    const status = buildBridgeHealthStatus([
+      {
+        accountKey: "qqbot:main",
+        adapter: {
+          ingress: {
+            getHealth: () => ({ connected: true, authenticated: true })
+          }
+        }
+      },
+      {
+        accountKey: "qqbot:shop",
+        adapter: {
+          ingress: {
+            getHealth: () => ({ connected: true, authenticated: false })
+          }
+        }
+      }
+    ], {
+      getHealth: () => ({
+        running: true,
+        initialized: true,
+        healthy: true,
+        targetConfigured: true,
+        lastPollAt: "2026-08-16T03:00:00.000Z",
+        lastCompletionAt: null,
+        lastError: null
+      })
+    });
+
+    expect(status).toEqual({
+      ok: false,
+      qqGateway: {
+        connected: true,
+        authenticated: false,
+        accounts: {
+          "qqbot:main": { connected: true, authenticated: true },
+          "qqbot:shop": { connected: true, authenticated: false }
+        }
+      },
+      completionMonitor: {
+        running: true,
+        initialized: true,
+        healthy: true,
+        targetConfigured: true,
+        lastPollAt: "2026-08-16T03:00:00.000Z",
+        lastCompletionAt: null,
+        lastError: null
+      }
+    });
+    expect(JSON.stringify(status)).not.toContain("token");
+    expect(JSON.stringify(status)).not.toContain("OPENID");
+  });
+
+  it("baselines Desktop completion before gateway startup can delay the first task", () => {
+    const mainPath = fileURLToPath(new URL("../../apps/bridge-daemon/src/main.ts", import.meta.url));
+    const source = fs.readFileSync(mainPath, "utf8");
+
+    expect(source.indexOf("await app.completionMonitor.start()"))
+      .toBeLessThan(source.indexOf("await entry.adapter.ingress.start()"));
   });
 });

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { hashIdentifierForLog } from "../../packages/domain/src/log-redaction.js";
 import { BridgeSessionStatus } from "../../packages/domain/src/session.js";
 import type { BridgeSession } from "../../packages/domain/src/session.js";
 import { DesktopDriverError } from "../../packages/domain/src/driver.js";
@@ -238,7 +239,7 @@ describe("BridgeOrchestrator", () => {
       "[qq-codex-bridge] duplicate inbound suppressed",
       expect.objectContaining({
         messageId: secondMessage.messageId,
-        sessionKey: secondMessage.sessionKey
+        sessionKeyHash: hashIdentifierForLog(secondMessage.sessionKey)
       })
     );
     warnSpy.mockRestore();
@@ -304,7 +305,7 @@ describe("BridgeOrchestrator", () => {
       "[qq-codex-bridge] duplicate inbound suppressed",
       expect.objectContaining({
         messageId: repeatedFirstMessage.messageId,
-        sessionKey: repeatedFirstMessage.sessionKey
+        sessionKeyHash: hashIdentifierForLog(repeatedFirstMessage.sessionKey)
       })
     );
     warnSpy.mockRestore();
@@ -548,7 +549,7 @@ describe("BridgeOrchestrator", () => {
     expect(warnSpy).toHaveBeenCalledWith(
       "[qq-codex-bridge] draft delivery failed",
       expect.objectContaining({
-        sessionKey: message.sessionKey,
+        sessionKeyHash: hashIdentifierForLog(message.sessionKey),
         messageId: message.messageId,
         draftId: "draft-1",
         error: "delivery failed"
@@ -607,7 +608,7 @@ describe("BridgeOrchestrator", () => {
       "[qq-codex-bridge] recoverable turn error",
       expect.objectContaining({
         messageId: message.messageId,
-        sessionKey: message.sessionKey,
+        sessionKeyHash: hashIdentifierForLog(message.sessionKey),
         error: "Codex desktop reply did not arrive before timeout"
       })
     );

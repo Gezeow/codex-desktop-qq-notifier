@@ -8,6 +8,7 @@ import {
   type TurnEvent
 } from "../../domain/src/message.js";
 import { DesktopDriverError } from "../../domain/src/driver.js";
+import { hashIdentifierForLog } from "../../domain/src/log-redaction.js";
 import type { ConversationProviderPort } from "../../ports/src/conversation.js";
 import type { QqEgressPort } from "../../ports/src/qq.js";
 import type { SessionStorePort, TranscriptStorePort } from "../../ports/src/store.js";
@@ -57,7 +58,7 @@ export class BridgeOrchestrator {
       if (this.isLikelyDuplicateInbound(message)) {
         console.warn("[qq-codex-bridge] duplicate inbound suppressed", {
           messageId: message.messageId,
-          sessionKey: message.sessionKey
+          sessionKeyHash: hashIdentifierForLog(message.sessionKey)
         });
         return;
       }
@@ -109,7 +110,7 @@ export class BridgeOrchestrator {
             const reason = error instanceof Error ? error.message : String(error);
             deliveryErrors.push(`${formattedDraft.draftId}: ${reason}`);
             console.warn("[qq-codex-bridge] draft delivery failed", {
-              sessionKey: message.sessionKey,
+              sessionKeyHash: hashIdentifierForLog(message.sessionKey),
               messageId: message.messageId,
               draftId: formattedDraft.draftId,
               error: reason
@@ -140,7 +141,7 @@ export class BridgeOrchestrator {
           );
           console.warn("[qq-codex-bridge] recoverable turn error", {
             messageId: message.messageId,
-            sessionKey: message.sessionKey,
+            sessionKeyHash: hashIdentifierForLog(message.sessionKey),
             error: lastError
           });
           return;

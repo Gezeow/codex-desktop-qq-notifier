@@ -1,14 +1,24 @@
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse
+} from "node:http";
 
-type JsonRoute = {
+export type JsonRoute = {
   routePath: string;
   dispatchPayload(payload: unknown): Promise<void>;
   onDispatchError?: (error: Error, payload: unknown) => void;
   allowOnlyLocal?: boolean;
 };
 
+export type HealthRoute = {
+  routePath: string;
+  getHealth(): unknown | Promise<unknown>;
+};
+
 type JsonServerDeps = {
-  routes: JsonRoute[];
+  routes: Array<JsonRoute | HealthRoute>;
 };
 
 type QqWebhookServerDeps = {
@@ -52,7 +62,7 @@ export function createInternalTurnEventServer(deps: InternalTurnEventServerDeps)
   });
 }
 
-export function createBridgeHttpServer(routes: JsonRoute[]): Server {
+export function createBridgeHttpServer(routes: Array<JsonRoute | HealthRoute>): Server {
   return createJsonServer({ routes });
 }
 
@@ -62,6 +72,29 @@ function createJsonServer(deps: JsonServerDeps): Server {
     if (!route) {
       response.statusCode = 404;
       response.end("not found");
+      return;
+    }
+
+    if (isHealthRoute(route)) {
+      if (!isLocalRequest(request)) {
+        response.statusCode = 403;
+        response.end("forbidden");
+        return;
+      }
+
+      if (request.method !== "GET") {
+        response.statusCode = 405;
+        response.end("method not allowed");
+        return;
+      }
+
+      try {
+        const payload = await route.getHealth();
+        writeJson(response, isHealthyPayload(payload) ? 200 : 503, payload);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "health check failed";
+        writeJson(response, 500, { ok: false, error: message });
+      }
       return;
     }
 
@@ -103,6 +136,24 @@ function createJsonServer(deps: JsonServerDeps): Server {
     response.statusCode = 202;
     response.end("accepted");
   });
+}
+
+function isHealthRoute(route: JsonRoute | HealthRoute): route is HealthRoute {
+  return "getHealth" in route;
+}
+
+function isHealthyPayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || !("ok" in payload)) {
+    return true;
+  }
+
+  return (payload as { ok?: unknown }).ok !== false;
+}
+
+function writeJson(response: ServerResponse, statusCode: number, payload: unknown): void {
+  response.statusCode = statusCode;
+  response.setHeader?.("content-type", "application/json; charset=utf-8");
+  response.end(JSON.stringify(payload));
 }
 
 function isLocalRequest(request: IncomingMessage): boolean {

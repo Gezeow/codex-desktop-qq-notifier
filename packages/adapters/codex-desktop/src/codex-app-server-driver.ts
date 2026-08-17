@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import WebSocket from "ws";
 import {
   type CodexControlState,
@@ -22,6 +22,7 @@ import {
   buildMediaArtifactFromReference,
   parseQqMediaSegments
 } from "../../qq/src/qq-media-parser.js";
+import { assertCodexCliSpawnAllowed } from "./desktop-mode.js";
 
 const APP_THREAD_REF_PREFIX = "codex-app-thread:";
 const LEGACY_THREAD_REF_PREFIX = "codex-thread:";
@@ -144,6 +145,22 @@ type CodexAppServerDriverOptions = {
     forwardNotification(method: string, params: unknown): Promise<void>;
   } | null;
 };
+
+type SpawnManagedCodexDeps = {
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  spawnFn?: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
+};
+
+export function spawnManagedCodexAppServer(
+  command: string,
+  args: string[],
+  options: SpawnOptions,
+  deps: SpawnManagedCodexDeps = {}
+): ChildProcess {
+  assertCodexCliSpawnAllowed(deps.env, deps.platform);
+  return (deps.spawnFn ?? spawn)(command, args, options);
+}
 
 export class CodexAppServerDriver implements DesktopDriverPort {
   private readonly connectTimeoutMs: number;
@@ -506,7 +523,7 @@ export class CodexAppServerDriver implements DesktopDriverPort {
 
     const port = await getFreePort();
     const url = `ws://127.0.0.1:${port}`;
-    this.child = spawn(
+    this.child = spawnManagedCodexAppServer(
       this.codexBinaryPath,
       ["app-server", "--listen", url, "-c", "analytics.enabled=false"],
       {

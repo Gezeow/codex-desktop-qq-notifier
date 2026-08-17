@@ -32,6 +32,7 @@ describe("dev launch", () => {
         {
           fetchFn,
           launchApp,
+          platform: "linux",
           sleep: async () => undefined
         }
       )
@@ -71,6 +72,7 @@ describe("dev launch", () => {
         {
           fetchFn,
           launchApp,
+          platform: "linux",
           sleep: async () => undefined
         }
       )
@@ -78,6 +80,31 @@ describe("dev launch", () => {
       launched: true
     });
     expect(launchApp).toHaveBeenCalledWith("Codex", 9229);
+  });
+
+  it("requires an existing loopback CDP endpoint on Windows without launching", async () => {
+    const fetchFn = vi.fn().mockRejectedValue(new Error("connect refused"));
+    const launchApp = vi.fn();
+
+    await expect(
+      ensureCodexDesktopForDev(
+        {
+          appName: "Codex",
+          remoteDebuggingPort: 9229,
+          startupTimeoutMs: 100,
+          startupPollIntervalMs: 0
+        },
+        {
+          fetchFn,
+          launchApp,
+          platform: "win32",
+          sleep: async () => undefined
+        }
+      )
+    ).rejects.toThrow(
+      "Codex desktop CDP endpoint is unavailable on 127.0.0.1:9229; automatic Windows launch is disabled"
+    );
+    expect(launchApp).not.toHaveBeenCalled();
   });
 
   it("fails after the startup timeout when the cdp endpoint never appears", async () => {
@@ -95,6 +122,7 @@ describe("dev launch", () => {
         {
           fetchFn,
           launchApp,
+          platform: "linux",
           sleep: async () => undefined
         }
       )

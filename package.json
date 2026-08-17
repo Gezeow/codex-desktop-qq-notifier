@@ -1,15 +1,15 @@
 {
   "name": "qq-codex-bridge",
-  "version": "0.1.4",
-  "description": "A bridge between QQ Official Bot and Codex Desktop, with media relay, STT, thread management, and incremental reply delivery.",
+  "version": "0.2.0",
+  "description": "Community Windows notifier for ChatGPT Desktop Codex completions delivered through a Tencent QQ Bot.",
   "type": "module",
-  "homepage": "https://github.com/983033995/qq-codex-bridge",
+  "homepage": "https://github.com/Gezeow/codex-desktop-qq-notifier",
   "bugs": {
-    "url": "https://github.com/983033995/qq-codex-bridge/issues"
+    "url": "https://github.com/Gezeow/codex-desktop-qq-notifier/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/983033995/qq-codex-bridge.git"
+    "url": "git+https://github.com/Gezeow/codex-desktop-qq-notifier.git"
   },
   "keywords": [
     "bridge",
@@ -30,7 +30,8 @@
     "dist/packages",
     ".env.example",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE.md"
   ],
   "engines": {
     "node": ">=20"
@@ -49,6 +50,8 @@
     "test:watch": "vitest",
     "check": "tsc -p tsconfig.json --noEmit",
     "prepare-release": "pnpm run build && npm pack --dry-run",
+    "release:metadata": "node scripts/generate-release-metadata.mjs packaging/windows/stage",
+    "windows:stage": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packaging/windows/build-stage.ps1",
     "prepublishOnly": "pnpm run build"
   },
   "dependencies": {

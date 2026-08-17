@@ -7,6 +7,7 @@ const BetterSqlite3 = require("better-sqlite3") as new (filePath: string) => Sql
 
 export type SqliteDatabase = {
   exec(sql: string): void;
+  transaction<T extends (...args: any[]) => any>(fn: T): T;
   prepare(sql: string): {
     get(...params: unknown[]): unknown;
     all(...params: unknown[]): unknown[];

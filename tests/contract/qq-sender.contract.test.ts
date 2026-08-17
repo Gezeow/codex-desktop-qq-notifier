@@ -33,7 +33,8 @@ describe("qq sender", () => {
 
   it("routes c2c drafts through the qq api client", async () => {
     const apiClient = {
-      sendC2CMessage: vi.fn().mockResolvedValue("qq-msg-1"),
+      sendC2CReply: vi.fn().mockResolvedValue("qq-msg-1"),
+      sendC2CProactive: vi.fn(),
       sendGroupMessage: vi.fn(),
       sendC2CMediaArtifact: vi.fn(),
       sendGroupMediaArtifact: vi.fn()
@@ -55,18 +56,76 @@ describe("qq sender", () => {
       deliveredAt: "2026-04-09T10:00:00.000Z"
     });
 
-    expect(apiClient.sendC2CMessage).toHaveBeenCalledWith(
-      "OPENID123",
-      "hello",
-      "qq-inbound-1",
-      { preferMarkdown: false }
-    );
+    expect(apiClient.sendC2CReply).toHaveBeenCalledWith({
+      openid: "OPENID123",
+      content: "hello",
+      inboundMsgId: "qq-inbound-1",
+      preferMarkdown: false
+    });
     expect(apiClient.sendGroupMessage).not.toHaveBeenCalled();
+  });
+
+  it("uses the explicit proactive C2C path without inheriting stale reply context", async () => {
+    const apiClient = {
+      sendC2CReply: vi.fn().mockResolvedValue("qq-reply-not-used"),
+      sendC2CProactive: vi.fn().mockResolvedValue("qq-proactive-1"),
+      sendGroupMessage: vi.fn(),
+      sendC2CMediaArtifact: vi.fn(),
+      sendGroupMediaArtifact: vi.fn()
+    };
+    const sender = new QqSender(apiClient);
+
+    await expect(
+      sender.deliverProactive({
+        draftId: "draft-proactive-1",
+        sessionKey: "qqbot:default::qq:c2c:OPENID123",
+        text: "completion text",
+        createdAt: "2026-04-09T10:00:01.000Z",
+        // Runtime callers cannot provide this field through the proactive
+        // type, but stale persisted data must not become a QQ msg_id either.
+        replyToMessageId: "stale-inbound-id"
+      } as never)
+    ).resolves.toEqual({
+      jobId: "draft-proactive-1",
+      sessionKey: "qqbot:default::qq:c2c:OPENID123",
+      providerMessageId: "qq-proactive-1",
+      deliveredAt: "2026-04-09T10:00:01.000Z"
+    });
+
+    expect(apiClient.sendC2CProactive).toHaveBeenCalledWith({
+      openid: "OPENID123",
+      content: "completion text",
+      preferMarkdown: false
+    });
+    expect(apiClient.sendC2CReply).not.toHaveBeenCalled();
+  });
+
+  it("fails a normal delivery without an inbound reply id instead of using draftId", async () => {
+    const apiClient = {
+      sendC2CReply: vi.fn(),
+      sendC2CProactive: vi.fn(),
+      sendGroupMessage: vi.fn(),
+      sendC2CMediaArtifact: vi.fn(),
+      sendGroupMediaArtifact: vi.fn()
+    };
+    const sender = new QqSender(apiClient);
+
+    await expect(
+      sender.deliver({
+        draftId: "draft-must-not-be-msg-id",
+        sessionKey: "qqbot:default::qq:c2c:OPENID123",
+        text: "reply without inbound id",
+        createdAt: "2026-04-09T10:00:01.500Z"
+      })
+    ).rejects.toThrow("real inbound replyToMessageId");
+    expect(apiClient.sendC2CReply).not.toHaveBeenCalled();
+    expect(apiClient.sendC2CProactive).not.toHaveBeenCalled();
   });
 
   it("routes qqmedia declarations through the qq media api client", async () => {
     const apiClient = {
-      sendC2CMessage: vi.fn().mockResolvedValue("qq-msg-text"),
+      sendC2CReply: vi.fn().mockResolvedValue("qq-msg-text"),
+      sendC2CProactive: vi.fn(),
       sendGroupMessage: vi.fn(),
       sendC2CMediaArtifact: vi.fn().mockResolvedValue("qq-msg-media"),
       sendGroupMediaArtifact: vi.fn()
@@ -88,12 +147,12 @@ describe("qq sender", () => {
       deliveredAt: "2026-04-09T10:00:02.000Z"
     });
 
-    expect(apiClient.sendC2CMessage).toHaveBeenCalledWith(
-      "OPENID123",
-      "图片如下：\n",
-      "qq-inbound-2",
-      { preferMarkdown: false }
-    );
+    expect(apiClient.sendC2CReply).toHaveBeenCalledWith({
+      openid: "OPENID123",
+      content: "图片如下：\n",
+      inboundMsgId: "qq-inbound-2",
+      preferMarkdown: false
+    });
     expect(apiClient.sendC2CMediaArtifact).toHaveBeenCalledWith(
       "OPENID123",
       expect.objectContaining({
@@ -107,7 +166,8 @@ describe("qq sender", () => {
 
   it("chunks long text replies instead of sending them as one oversized qq message", async () => {
     const apiClient = {
-      sendC2CMessage: vi.fn().mockResolvedValue("qq-msg-text"),
+      sendC2CReply: vi.fn().mockResolvedValue("qq-msg-text"),
+      sendC2CProactive: vi.fn(),
       sendGroupMessage: vi.fn(),
       sendC2CMediaArtifact: vi.fn(),
       sendGroupMediaArtifact: vi.fn()
@@ -122,33 +182,31 @@ describe("qq sender", () => {
       replyToMessageId: "qq-inbound-3"
     });
 
-    expect(apiClient.sendC2CMessage).toHaveBeenCalledTimes(3);
-    expect(apiClient.sendC2CMessage).toHaveBeenNthCalledWith(
-      1,
-      "OPENID123",
-      "a".repeat(5000),
-      "qq-inbound-3",
-      { preferMarkdown: false }
-    );
-    expect(apiClient.sendC2CMessage).toHaveBeenNthCalledWith(
-      2,
-      "OPENID123",
-      "a".repeat(5000),
-      "qq-inbound-3",
-      { preferMarkdown: false }
-    );
-    expect(apiClient.sendC2CMessage).toHaveBeenNthCalledWith(
-      3,
-      "OPENID123",
-      "a".repeat(20),
-      "qq-inbound-3",
-      { preferMarkdown: false }
-    );
+    expect(apiClient.sendC2CReply).toHaveBeenCalledTimes(3);
+    expect(apiClient.sendC2CReply).toHaveBeenNthCalledWith(1, {
+      openid: "OPENID123",
+      content: "a".repeat(5000),
+      inboundMsgId: "qq-inbound-3",
+      preferMarkdown: false
+    });
+    expect(apiClient.sendC2CReply).toHaveBeenNthCalledWith(2, {
+      openid: "OPENID123",
+      content: "a".repeat(5000),
+      inboundMsgId: "qq-inbound-3",
+      preferMarkdown: false
+    });
+    expect(apiClient.sendC2CReply).toHaveBeenNthCalledWith(3, {
+      openid: "OPENID123",
+      content: "a".repeat(20),
+      inboundMsgId: "qq-inbound-3",
+      preferMarkdown: false
+    });
   });
 
   it("continues sending trailing text when a media artifact fails to send", async () => {
     const apiClient = {
-      sendC2CMessage: vi.fn().mockResolvedValue("qq-msg-text"),
+      sendC2CReply: vi.fn().mockResolvedValue("qq-msg-text"),
+      sendC2CProactive: vi.fn(),
       sendGroupMessage: vi.fn(),
       sendC2CMediaArtifact: vi.fn().mockRejectedValue(new Error("QQ media upload failed: 400")),
       sendGroupMediaArtifact: vi.fn()
@@ -174,33 +232,31 @@ describe("qq sender", () => {
       deliveredAt: "2026-04-09T10:00:04.000Z"
     });
 
-    expect(apiClient.sendC2CMessage).toHaveBeenNthCalledWith(
-      1,
-      "OPENID123",
-      "开头文本\n",
-      "qq-inbound-4",
-      { preferMarkdown: false }
-    );
+    expect(apiClient.sendC2CReply).toHaveBeenNthCalledWith(1, {
+      openid: "OPENID123",
+      content: "开头文本\n",
+      inboundMsgId: "qq-inbound-4",
+      preferMarkdown: false
+    });
     expect(apiClient.sendC2CMediaArtifact).toHaveBeenCalledTimes(1);
-    expect(apiClient.sendC2CMessage).toHaveBeenNthCalledWith(
-      2,
-      "OPENID123",
-      expect.stringContaining("媒体发送失败"),
-      "qq-inbound-4",
-      { preferMarkdown: false }
-    );
-    expect(apiClient.sendC2CMessage).toHaveBeenNthCalledWith(
-      3,
-      "OPENID123",
-      "\n结尾文本",
-      "qq-inbound-4",
-      { preferMarkdown: false }
-    );
+    expect(apiClient.sendC2CReply).toHaveBeenNthCalledWith(2, {
+      openid: "OPENID123",
+      content: expect.stringContaining("媒体发送失败"),
+      inboundMsgId: "qq-inbound-4",
+      preferMarkdown: false
+    });
+    expect(apiClient.sendC2CReply).toHaveBeenNthCalledWith(3, {
+      openid: "OPENID123",
+      content: "\n结尾文本",
+      inboundMsgId: "qq-inbound-4",
+      preferMarkdown: false
+    });
   });
 
   it("preserves markdown links and normalizes remote markdown images for qq markdown mode", async () => {
     const apiClient = {
-      sendC2CMessage: vi.fn().mockResolvedValue("qq-msg-markdown"),
+      sendC2CReply: vi.fn().mockResolvedValue("qq-msg-markdown"),
+      sendC2CProactive: vi.fn(),
       sendGroupMessage: vi.fn(),
       sendC2CMediaArtifact: vi.fn(),
       sendGroupMediaArtifact: vi.fn()
@@ -220,21 +276,22 @@ describe("qq sender", () => {
     });
 
     expect(apiClient.sendC2CMediaArtifact).not.toHaveBeenCalled();
-    expect(apiClient.sendC2CMessage).toHaveBeenCalledWith(
-      "OPENID123",
-      [
+    expect(apiClient.sendC2CReply).toHaveBeenCalledWith({
+      openid: "OPENID123",
+      content: [
         "测试图片",
         "![#512px #512px](https://example.com/cover.png)",
         "[点击打开测试音频 MP3](https://example.com/demo.mp3)"
       ].join("\n"),
-      "qq-inbound-5",
-      { preferMarkdown: true }
-    );
+      inboundMsgId: "qq-inbound-5",
+      preferMarkdown: true
+    });
   });
 
   it("sends fenced code blocks in qq markdown mode", async () => {
     const apiClient = {
-      sendC2CMessage: vi.fn().mockResolvedValue("qq-msg-code"),
+      sendC2CReply: vi.fn().mockResolvedValue("qq-msg-code"),
+      sendC2CProactive: vi.fn(),
       sendGroupMessage: vi.fn(),
       sendC2CMediaArtifact: vi.fn(),
       sendGroupMediaArtifact: vi.fn()
@@ -258,17 +315,18 @@ describe("qq sender", () => {
       replyToMessageId: "qq-inbound-7"
     });
 
-    expect(apiClient.sendC2CMessage).toHaveBeenCalledWith(
-      "OPENID123",
-      codeReply,
-      "qq-inbound-7",
-      { preferMarkdown: true }
-    );
+    expect(apiClient.sendC2CReply).toHaveBeenCalledWith({
+      openid: "OPENID123",
+      content: codeReply,
+      inboundMsgId: "qq-inbound-7",
+      preferMarkdown: true
+    });
   });
 
   it("sends markdown tables in qq markdown mode", async () => {
     const apiClient = {
-      sendC2CMessage: vi.fn().mockResolvedValue("qq-msg-table"),
+      sendC2CReply: vi.fn().mockResolvedValue("qq-msg-table"),
+      sendC2CProactive: vi.fn(),
       sendGroupMessage: vi.fn(),
       sendC2CMediaArtifact: vi.fn(),
       sendGroupMediaArtifact: vi.fn()
@@ -290,17 +348,18 @@ describe("qq sender", () => {
       replyToMessageId: "qq-inbound-7b"
     });
 
-    expect(apiClient.sendC2CMessage).toHaveBeenCalledWith(
-      "OPENID123",
-      tableReply,
-      "qq-inbound-7b",
-      { preferMarkdown: true }
-    );
+    expect(apiClient.sendC2CReply).toHaveBeenCalledWith({
+      openid: "OPENID123",
+      content: tableReply,
+      inboundMsgId: "qq-inbound-7b",
+      preferMarkdown: true
+    });
   });
 
   it("does not send duplicate media when the draft already contains the parsed artifact", async () => {
     const apiClient = {
-      sendC2CMessage: vi.fn().mockResolvedValue("qq-msg-dedupe"),
+      sendC2CReply: vi.fn().mockResolvedValue("qq-msg-dedupe"),
+      sendC2CProactive: vi.fn(),
       sendGroupMessage: vi.fn(),
       sendC2CMediaArtifact: vi.fn().mockResolvedValue("qq-msg-media"),
       sendGroupMediaArtifact: vi.fn()

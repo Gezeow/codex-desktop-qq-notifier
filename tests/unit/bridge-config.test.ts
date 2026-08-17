@@ -28,6 +28,32 @@ describe("bridge config", () => {
     ]);
   });
 
+  it("accepts Windows user-environment aliases while keeping canonical names preferred", () => {
+    const aliasOnly = loadConfigFromEnv({
+      QQBOT_APPID: "alias-app",
+      QQBOT_APPSECRET: "alias-credential"
+    });
+    expect(aliasOnly.qqBot).toEqual(
+      expect.objectContaining({
+        appId: "alias-app",
+        clientSecret: "alias-credential"
+      })
+    );
+
+    const canonicalPreferred = loadConfigFromEnv({
+      QQBOT_APP_ID: "canonical-app",
+      QQBOT_CLIENT_SECRET: "canonical-credential",
+      QQBOT_APPID: "alias-app",
+      QQBOT_APPSECRET: "alias-credential"
+    });
+    expect(canonicalPreferred.qqBot).toEqual(
+      expect.objectContaining({
+        appId: "canonical-app",
+        clientSecret: "canonical-credential"
+      })
+    );
+  });
+
   it("loads multiple qq and weixin accounts from structured env json", () => {
     const config = loadConfigFromEnv({
       QQBOT_APP_ID: "fallback-app",

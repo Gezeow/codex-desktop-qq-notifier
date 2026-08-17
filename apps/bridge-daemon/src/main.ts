@@ -1,10 +1,13 @@
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { InboundMessage, OutboundDraft, TurnEvent } from "../../../packages/domain/src/message.js";
+import { hashIdentifierForLog } from "../../../packages/domain/src/log-redaction.js";
 import { bootstrap, INTERNAL_TURN_EVENT_PATH } from "./bootstrap.js";
 import { createBridgeHttpServer } from "./http-server.js";
 import { ThreadCommandHandler } from "./thread-command-handler.js";
 import { startWeixinGatewayService, type WeixinGatewayServiceHandle } from "../../weixin-gateway/src/cli.js";
+import type { QqGatewayHealth } from "../../../packages/adapters/qq/src/qq-gateway-client.js";
+import type { DesktopCompletionMonitorHealth } from "../../../packages/orchestrator/src/desktop-completion-monitor.js";
 
 type IngressMessageHandlerDeps = {
   threadCommandHandler: Pick<ThreadCommandHandler, "handleIfCommand">;
@@ -28,7 +31,7 @@ export function createIngressMessageHandler(deps: IngressMessageHandlerDeps) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error("[qq-codex-bridge] message handling failed", {
         messageId: message.messageId,
-        sessionKey: message.sessionKey,
+        sessionKeyHash: hashIdentifierForLog(message.sessionKey),
         error: errorMessage
       });
       if (error instanceof Error && error.stack) {
@@ -58,6 +61,62 @@ type BridgeRuntimeHandle = {
   shutdown(): Promise<void>;
   channels: string[];
 };
+
+export type BridgeHealthStatus = {
+  ok: boolean;
+  qqGateway: {
+    connected: boolean;
+    authenticated: boolean;
+    accounts: Record<string, QqGatewayHealth>;
+  };
+  completionMonitor: DesktopCompletionMonitorHealth;
+};
+
+export function buildBridgeHealthStatus(
+  qqIngressHandlers: ReadonlyArray<{
+    accountKey: string;
+    adapter: {
+      ingress: {
+        getHealth?: () => QqGatewayHealth;
+      };
+    };
+  }>,
+  completionMonitor?: { getHealth(): DesktopCompletionMonitorHealth }
+): BridgeHealthStatus {
+  const accounts = Object.fromEntries(
+    qqIngressHandlers.map((entry) => {
+      const health = entry.adapter.ingress.getHealth?.() ?? {
+        connected: false,
+        authenticated: false
+      };
+      return [entry.accountKey, {
+        connected: health.connected === true,
+        authenticated: health.authenticated === true
+      }];
+    })
+  );
+  const accountStatuses = Object.values(accounts);
+  const connected = accountStatuses.length > 0 && accountStatuses.every((status) => status.connected);
+  const authenticated = accountStatuses.length > 0 && accountStatuses.every((status) => status.authenticated);
+
+  return {
+    ok: connected && authenticated,
+    qqGateway: {
+      connected,
+      authenticated,
+      accounts
+    },
+    completionMonitor: completionMonitor?.getHealth() ?? {
+      running: false,
+      initialized: false,
+      healthy: false,
+      targetConfigured: false,
+      lastPollAt: null,
+      lastCompletionAt: null,
+      lastError: "completion monitor unavailable"
+    }
+  };
+}
 
 export async function runBridgeDaemon(): Promise<BridgeRuntimeHandle> {
   const app = bootstrap();
@@ -111,6 +170,10 @@ export async function runBridgeDaemon(): Promise<BridgeRuntimeHandle> {
   });
   const bridgeHttpServer = createBridgeHttpServer([
     {
+      routePath: "/health",
+      getHealth: () => buildBridgeHealthStatus(qqIngressHandlers, app.completionMonitor)
+    },
+    {
       routePath: INTERNAL_TURN_EVENT_PATH,
       allowOnlyLocal: true,
       dispatchPayload: async (payload) => {
@@ -148,6 +211,10 @@ export async function runBridgeDaemon(): Promise<BridgeRuntimeHandle> {
     });
   });
 
+  // Baseline Desktop state before gateway authentication can delay startup.
+  // Otherwise a user's first on-demand task can begin during that gap and be
+  // mistaken for a pre-existing running turn by the monitor's first poll.
+  await app.completionMonitor.start();
   for (const entry of qqIngressHandlers) {
     await entry.adapter.ingress.onMessage(entry.ingressHandler);
     await entry.adapter.ingress.start();
@@ -189,16 +256,21 @@ export async function runBridgeDaemon(): Promise<BridgeRuntimeHandle> {
   return {
     channels,
     shutdown: async () => {
-      await Promise.allSettled([
-        ...qqIngressHandlers.map((entry) =>
-          new Promise<void>((resolve) => {
-            const maybeClose = entry.adapter.ingress as { stop?: () => Promise<void> | void };
-            Promise.resolve(maybeClose.stop?.()).finally(() => resolve());
-          })
-        ),
-        ...managedServices.map((service) => service.shutdown())
-      ]);
-      await new Promise<void>((resolve) => bridgeHttpServer.close(() => resolve()));
+      try {
+        await app.completionMonitor.stop();
+        await Promise.allSettled([
+          ...qqIngressHandlers.map((entry) =>
+            new Promise<void>((resolve) => {
+              const maybeClose = entry.adapter.ingress as { stop?: () => Promise<void> | void };
+              Promise.resolve(maybeClose.stop?.()).finally(() => resolve());
+            })
+          ),
+          ...managedServices.map((service) => service.shutdown())
+        ]);
+        await new Promise<void>((resolve) => bridgeHttpServer.close(() => resolve()));
+      } finally {
+        app.db.close();
+      }
     }
   };
 }

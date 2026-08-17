@@ -80,6 +80,77 @@ describe("qq gateway client", () => {
     await client.stop();
   });
 
+  it("reports only a live READY/RESUMED websocket as authenticated", async () => {
+    let port = 0;
+    let socketToClose: { close(code?: number): void } | undefined;
+    let resolveReady!: () => void;
+    const readySeen = new Promise<void>((resolve) => {
+      resolveReady = resolve;
+    });
+
+    const httpServer = createServer();
+    const wsServer = new WebSocketServer({
+      server: httpServer,
+      path: "/gateway"
+    });
+    servers.push(wsServer);
+    servers.push(httpServer);
+
+    wsServer.on("connection", (socket) => {
+      socketToClose = socket;
+      socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 1000 } }));
+      socket.on("message", (payload) => {
+        const message = JSON.parse(payload.toString()) as { op: number };
+        if (message.op === 2) {
+          socket.send(JSON.stringify({ op: 0, t: "READY", s: 1, d: { session_id: "session-health" } }));
+          resolveReady();
+        }
+      });
+    });
+
+    httpServer.listen(0, "127.0.0.1");
+    await once(httpServer, "listening");
+    const address = httpServer.address();
+    if (!address || typeof address === "string") {
+      throw new Error("expected an address info object");
+    }
+    port = address.port;
+
+    const client = new QqGatewayClient({
+      accountKey: "qqbot:health",
+      appId: "app-id",
+      apiClient: {
+        getAccessToken: vi.fn().mockResolvedValue("token-health"),
+        getGatewayUrl: vi.fn().mockResolvedValue(`ws://127.0.0.1:${port}/gateway`)
+      },
+      sessionStore: {
+        load: vi.fn().mockReturnValue(null),
+        save: vi.fn(),
+        clear: vi.fn()
+      },
+      reconnectDelaysMs: [100000]
+    });
+
+    expect(client.getHealth()).toEqual({ connected: false, authenticated: false });
+    await client.start();
+    await vi.waitFor(() => {
+      expect(client.getHealth()).toEqual({ connected: true, authenticated: false });
+    });
+
+    await readySeen;
+    await vi.waitFor(() => {
+      expect(client.getHealth()).toEqual({ connected: true, authenticated: true });
+    });
+
+    socketToClose!.close(4914);
+    await vi.waitFor(() => {
+      expect(client.getHealth()).toEqual({ connected: false, authenticated: false });
+    });
+
+    await client.stop();
+    expect(client.getHealth()).toEqual({ connected: false, authenticated: false });
+  });
+
   it("resumes an existing session when a saved session is available", async () => {
     let port = 0;
     let resumePayload: Record<string, unknown> | null = null;

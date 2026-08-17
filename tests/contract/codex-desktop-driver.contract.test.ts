@@ -170,6 +170,54 @@ class FakeHtmlElement {
 }
 
 describe("codex desktop driver contract", () => {
+  it("reads completion state from the main Codex page when an avatar overlay page also exists", async () => {
+    const evaluateOnPage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        threadId: "thread-main",
+        title: "长结果验收",
+        projectName: "qq-codex-bridge",
+        isTopLevel: true,
+        topLevelThreadIds: ["thread-main"]
+      })
+      .mockResolvedValueOnce({
+        unitKey: "turn-main:msg-final",
+        reply: "QQ_LONG_RESULT_BEGIN\nQQ_LONG_RESULT_END",
+        isStreaming: false
+      });
+    const driver = new CodexDesktopDriver({
+      connect: vi.fn(),
+      listTargets: vi.fn().mockResolvedValue([
+        {
+          id: "avatar-overlay",
+          title: "Codex",
+          type: "page",
+          url: "app://-/index.html?initialRoute=%2Favatar-overlay"
+        },
+        {
+          id: "main-page",
+          title: "Codex",
+          type: "page",
+          url: "app://-/index.html"
+        }
+      ]),
+      evaluateOnPage,
+      dispatchKeyEvent: vi.fn(),
+      insertText: vi.fn()
+    } as unknown as CdpSession);
+
+    await expect(driver.readCompletionPoll()).resolves.toMatchObject({
+      active: {
+        threadId: "thread-main",
+        responseId: "turn-main:msg-final",
+        responseText: "QQ_LONG_RESULT_BEGIN\nQQ_LONG_RESULT_END",
+        isTopLevel: true
+      }
+    });
+    expect(evaluateOnPage).toHaveBeenCalledTimes(2);
+    expect(evaluateOnPage.mock.calls.every((call) => call[1] === "main-page")).toBe(true);
+  });
+
   it("extracts the latest assistant reply from a snapshot string", () => {
     const reply = parseAssistantReply(`
       User: hello
@@ -191,11 +239,11 @@ describe("codex desktop driver contract", () => {
       rect: { x: 0, y: 0, width: 200, height: 80 }
     });
     const visibleAssistant = new FakeHtmlElement({
-      attrs: { "data-content-search-unit-key": "assistant-visible:0:assistant" },
+      attrs: { "data-content-search-unit-key": "turn-visible:msg_current" },
       rect: { x: 420, y: 520, width: 736, height: 180 },
       textContent: "当前可见的新回复",
       selectorMap: new Map([
-        ['[class*="_markdownContent_"]', [visibleRichContent]],
+        ['[class*="_markdownContent_"], [class*="_MarkdownRoot_"]', [visibleRichContent]],
         ['img[src], audio[src], audio source[src], video[src], video source[src], a[href]', []],
         ['.text-xs, [aria-live], [data-state], [class*="status"], [class*="loading"]', []]
       ])
@@ -205,7 +253,7 @@ describe("codex desktop driver contract", () => {
       rect: { x: 420, y: 2234, width: 736, height: 180 },
       textContent: "更旧的历史回复，不该被拿到",
       selectorMap: new Map([
-        ['[class*="_markdownContent_"]', []],
+        ['[class*="_markdownContent_"], [class*="_MarkdownRoot_"]', []],
         ['img[src], audio[src], audio source[src], video[src], video source[src], a[href]', []],
         ['.text-xs, [aria-live], [data-state], [class*="status"], [class*="loading"]', []]
       ])
@@ -225,7 +273,7 @@ describe("codex desktop driver contract", () => {
     (globalThis as Record<string, unknown>).window = { innerHeight: 900 };
     (globalThis as Record<string, unknown>).document = {
       querySelectorAll: (selector: string) => {
-        if (selector === '[data-content-search-unit-key$=":assistant"]') {
+        if (selector === '[data-content-search-unit-key]') {
           return [visibleAssistant, staleFarBelow];
         }
         if (selector === 'button, [role="button"], [aria-busy="true"]') {
@@ -248,7 +296,7 @@ describe("codex desktop driver contract", () => {
     try {
       const result = eval(probeScript) as { unitKey?: string; reply?: string | null; isStreaming?: boolean } | null;
       expect(result).toMatchObject({
-        unitKey: "assistant-visible:0:assistant",
+        unitKey: "turn-visible:msg_current",
         reply: "当前可见的新回复",
         isStreaming: false
       });

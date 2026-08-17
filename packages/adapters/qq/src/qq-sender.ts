@@ -1,11 +1,31 @@
 import type { DeliveryRecord, MediaArtifact, OutboundDraft } from "../../../domain/src/message.js";
 import type { QqEgressPort } from "../../../ports/src/qq.js";
-import type { QqApiClient } from "./qq-api-client.js";
+import type { C2CTextProactiveRequest, QqApiClient } from "./qq-api-client.js";
 import { buildMediaArtifactFromReference, parseQqMediaSegments } from "./qq-media-parser.js";
 
 const QQ_MARKDOWN_DEFAULT_IMAGE_SIZE = { width: 512, height: 512 };
 
 type QqChunkMode = "plain" | "markdown";
+
+type QqReplyTextMode = {
+  mode: "reply";
+  inboundMsgId: string;
+};
+
+type QqProactiveTextMode = {
+  mode: "proactive";
+};
+
+type QqTextDeliveryMode = QqReplyTextMode | QqProactiveTextMode;
+
+type QqProactiveDraft = Omit<OutboundDraft, "replyToMessageId"> & {
+  replyToMessageId?: never;
+};
+
+type QqApiPort = Pick<
+  QqApiClient,
+  "sendC2CReply" | "sendC2CProactive" | "sendGroupMessage" | "sendC2CMediaArtifact" | "sendGroupMediaArtifact"
+>;
 
 export function chunkTextForQq(text: string, limit = 5000, mode: QqChunkMode = "plain"): string[] {
   if (mode === "markdown") {
@@ -22,15 +42,54 @@ export function chunkTextForQq(text: string, limit = 5000, mode: QqChunkMode = "
 }
 
 export class QqSender implements QqEgressPort {
-  constructor(
-    private readonly apiClient?: Pick<
-      QqApiClient,
-      "sendC2CMessage" | "sendGroupMessage" | "sendC2CMediaArtifact" | "sendGroupMediaArtifact"
-    >
-  ) {}
+  constructor(private readonly apiClient?: QqApiPort) {}
 
   async deliver(draft: OutboundDraft): Promise<DeliveryRecord> {
+    const replyToMessageId = draft.replyToMessageId?.trim();
+    if (!replyToMessageId) {
+      throw new Error("QQ reply requires the real inbound replyToMessageId");
+    }
+
     const providerMessageId = await this.deliverThroughApiClient(draft);
+
+    return {
+      jobId: draft.draftId,
+      sessionKey: draft.sessionKey,
+      providerMessageId,
+      deliveredAt: draft.createdAt
+    };
+  }
+
+  /**
+   * Deliver a Desktop completion as a C2C proactive text message.
+   *
+   * This is deliberately a separate entry point from `deliver`: completion
+   * notifications have no current QQ inbound event and must never inherit a
+   * cached reply id or use the draft id as `msg_id`.
+   */
+  async deliverProactive(draft: QqProactiveDraft): Promise<DeliveryRecord> {
+    if (!this.apiClient) {
+      return {
+        jobId: draft.draftId,
+        sessionKey: draft.sessionKey,
+        providerMessageId: null,
+        deliveredAt: draft.createdAt
+      };
+    }
+
+    const target = parseSessionTarget(draft.sessionKey);
+    if (target.chatType !== "c2c" || !target.peerId) {
+      throw new Error("QQ proactive delivery supports C2C targets only");
+    }
+    if (draft.mediaArtifacts?.length || parseQqMediaSegments(draft.text).some((segment) => segment.type === "media")) {
+      throw new Error("QQ proactive delivery supports text-only completion notifications");
+    }
+
+    const providerMessageId = await this.sendTextSegment(
+      target,
+      normalizeTextSegmentForQq(draft.text),
+      { mode: "proactive" }
+    );
 
     return {
       jobId: draft.draftId,
@@ -43,7 +102,7 @@ export class QqSender implements QqEgressPort {
   private async sendTextSegment(
     target: { chatType: string; peerId: string },
     text: string,
-    replyToMessageId: string
+    deliveryMode: QqTextDeliveryMode
   ): Promise<string | null> {
     if (!text) {
       return null;
@@ -59,14 +118,29 @@ export class QqSender implements QqEgressPort {
       }
 
       if (target.chatType === "c2c") {
-        lastProviderMessageId = await this.apiClient!.sendC2CMessage(target.peerId, chunk, replyToMessageId, {
-          preferMarkdown
-        });
+        if (deliveryMode.mode === "reply") {
+          lastProviderMessageId = await this.apiClient!.sendC2CReply({
+            openid: target.peerId,
+            inboundMsgId: deliveryMode.inboundMsgId,
+            content: chunk,
+            preferMarkdown
+          });
+        } else {
+          const request: C2CTextProactiveRequest = {
+            openid: target.peerId,
+            content: chunk,
+            preferMarkdown
+          };
+          lastProviderMessageId = await this.apiClient!.sendC2CProactive(request);
+        }
         continue;
       }
 
       if (target.chatType === "group") {
-        lastProviderMessageId = await this.apiClient!.sendGroupMessage(target.peerId, chunk, replyToMessageId, {
+        if (deliveryMode.mode !== "reply") {
+          throw new Error("QQ proactive delivery supports C2C targets only");
+        }
+        lastProviderMessageId = await this.apiClient!.sendGroupMessage(target.peerId, chunk, deliveryMode.inboundMsgId, {
           preferMarkdown
         });
         continue;
@@ -103,7 +177,10 @@ export class QqSender implements QqEgressPort {
       return null;
     }
 
-    const replyToMessageId = draft.replyToMessageId ?? draft.draftId;
+    const replyToMessageId = draft.replyToMessageId?.trim();
+    if (!replyToMessageId) {
+      throw new Error("QQ reply requires the real inbound replyToMessageId");
+    }
     const target = parseSessionTarget(draft.sessionKey);
     let lastProviderMessageId: string | null = null;
     const deliveredArtifactKeys = new Set<string>();
@@ -113,7 +190,7 @@ export class QqSender implements QqEgressPort {
         lastProviderMessageId = await this.sendTextSegment(
           target,
           normalizeTextSegmentForQq(segment.text),
-          replyToMessageId
+          { mode: "reply", inboundMsgId: replyToMessageId }
         );
         continue;
       }
@@ -130,7 +207,7 @@ export class QqSender implements QqEgressPort {
         lastProviderMessageId = await this.sendTextSegment(
           target,
           this.buildMediaFailureText(artifact, error),
-          replyToMessageId
+          { mode: "reply", inboundMsgId: replyToMessageId }
         );
       }
     }
@@ -143,12 +220,12 @@ export class QqSender implements QqEgressPort {
         }
         deliveredArtifactKeys.add(artifactKey);
         try {
-          lastProviderMessageId = await this.sendMediaArtifact(target, artifact, replyToMessageId);
+        lastProviderMessageId = await this.sendMediaArtifact(target, artifact, replyToMessageId);
         } catch (error) {
           lastProviderMessageId = await this.sendTextSegment(
             target,
             this.buildMediaFailureText(artifact, error),
-            replyToMessageId
+            { mode: "reply", inboundMsgId: replyToMessageId }
           );
         }
       }
@@ -158,7 +235,11 @@ export class QqSender implements QqEgressPort {
       return lastProviderMessageId;
     }
 
-    return this.sendTextSegment(target, normalizeTextSegmentForQq(draft.text), replyToMessageId);
+    return this.sendTextSegment(
+      target,
+      normalizeTextSegmentForQq(draft.text),
+      { mode: "reply", inboundMsgId: replyToMessageId }
+    );
   }
 
 }

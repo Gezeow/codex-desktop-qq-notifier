@@ -62,8 +62,8 @@ export type AppConfig = z.infer<typeof appConfigSchema>;
 export function loadConfigFromEnv(env: NodeJS.ProcessEnv): AppConfig {
   const fallbackQqBot = {
     accountId: env.QQBOT_ACCOUNT_ID ?? "default",
-    appId: env.QQBOT_APP_ID,
-    clientSecret: env.QQBOT_CLIENT_SECRET,
+    appId: env.QQBOT_APP_ID ?? env.QQBOT_APPID,
+    clientSecret: env.QQBOT_CLIENT_SECRET ?? env.QQBOT_APPSECRET,
     markdownSupport: env.QQBOT_MARKDOWN_SUPPORT === "true",
     stt: resolveSttConfig(env)
   };

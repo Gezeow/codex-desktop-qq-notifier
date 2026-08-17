@@ -40,6 +40,11 @@ type QqGatewayClientConfig = {
   reconnectDelaysMs?: number[];
 };
 
+export type QqGatewayHealth = {
+  connected: boolean;
+  authenticated: boolean;
+};
+
 export class QqGatewayClient implements QqIngressPort {
   private readonly gateway: QqGateway;
   private readonly reconnectDelaysMs: number[];
@@ -51,6 +56,8 @@ export class QqGatewayClient implements QqIngressPort {
   private reconnectAttempt = 0;
   private startingPromise: Promise<void> | null = null;
   private started = false;
+  private connected = false;
+  private authenticated = false;
   private shouldInvalidateToken = false;
   private nextReconnectDelayMs: number | null = null;
 
@@ -67,6 +74,14 @@ export class QqGatewayClient implements QqIngressPort {
     await this.gateway.onMessage(handler);
   }
 
+  getHealth(): QqGatewayHealth {
+    const socketOpen = this.socket?.readyState === WebSocket.OPEN;
+    return {
+      connected: this.connected && socketOpen,
+      authenticated: this.authenticated && socketOpen
+    };
+  }
+
   async start(): Promise<void> {
     this.started = true;
     if (!this.startingPromise) {
@@ -79,6 +94,7 @@ export class QqGatewayClient implements QqIngressPort {
 
   async stop(): Promise<void> {
     this.started = false;
+    this.markDisconnected();
     this.clearHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -112,6 +128,8 @@ export class QqGatewayClient implements QqIngressPort {
     this.currentAccessToken = accessToken;
     const gatewayUrl = await this.config.apiClient.getGatewayUrl();
     const socket = new WebSocket(gatewayUrl);
+    this.socket = socket;
+    this.connected = false;
 
     socket.on("message", (payload) => {
       void this.handleSocketMessage(socket, payload.toString());
@@ -127,12 +145,13 @@ export class QqGatewayClient implements QqIngressPort {
 
     await this.waitForSocketOpen(socket);
 
-    if (!this.started) {
+    if (!this.started || this.socket !== socket) {
       socket.close();
       return;
     }
 
     this.socket = socket;
+    this.connected = true;
     this.reconnectAttempt = 0;
   }
 
@@ -163,7 +182,9 @@ export class QqGatewayClient implements QqIngressPort {
     try {
       payload = JSON.parse(rawPayload) as GatewayPayload;
     } catch (error) {
-      console.error("[qq-codex-bridge] qq gateway payload parse failed", { error, rawPayload });
+      console.error("[qq-codex-bridge] qq gateway payload parse failed", {
+        error: error instanceof Error ? error.message : "invalid JSON"
+      });
       return;
     }
 
@@ -176,10 +197,11 @@ export class QqGatewayClient implements QqIngressPort {
         await this.handleHello(socket, payload);
         return;
       case 0:
-        await this.handleDispatch(payload);
+        await this.handleDispatch(socket, payload);
         return;
       case 7:
         this.nextReconnectDelayMs = 0;
+        this.markDisconnectedForSocket(socket);
         socket.close();
         return;
       case 9:
@@ -188,6 +210,7 @@ export class QqGatewayClient implements QqIngressPort {
           this.shouldInvalidateToken = true;
         }
         this.nextReconnectDelayMs = 3000;
+        this.markDisconnectedForSocket(socket);
         socket.close();
         return;
       case 11:
@@ -231,7 +254,11 @@ export class QqGatewayClient implements QqIngressPort {
     this.startHeartbeat(heartbeatInterval);
   }
 
-  private async handleDispatch(payload: GatewayPayload): Promise<void> {
+  private async handleDispatch(socket: WebSocket, payload: GatewayPayload): Promise<void> {
+    if (!this.started || socket !== this.socket) {
+      return;
+    }
+
     const dispatchData = this.readDispatchData(payload.d);
 
     if (payload.t === "READY") {
@@ -243,10 +270,12 @@ export class QqGatewayClient implements QqIngressPort {
         };
         this.config.sessionStore.save(this.currentSession);
       }
+      this.authenticated = true;
       return;
     }
 
     if (payload.t === "RESUMED") {
+      this.authenticated = true;
       if (this.currentSession) {
         this.config.sessionStore.save(this.currentSession);
       }
@@ -294,6 +323,7 @@ export class QqGatewayClient implements QqIngressPort {
       return;
     }
 
+    this.markDisconnected();
     this.socket = null;
     this.clearHeartbeat();
 
@@ -361,6 +391,17 @@ export class QqGatewayClient implements QqIngressPort {
   private clearSession(): void {
     this.currentSession = null;
     this.config.sessionStore.clear();
+  }
+
+  private markDisconnected(): void {
+    this.connected = false;
+    this.authenticated = false;
+  }
+
+  private markDisconnectedForSocket(socket: WebSocket): void {
+    if (this.socket === socket) {
+      this.markDisconnected();
+    }
   }
 
   private readHeartbeatInterval(payload: unknown): number | null {

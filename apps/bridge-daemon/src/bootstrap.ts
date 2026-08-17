@@ -12,7 +12,12 @@ import { CodexDesktopAppUiNotificationForwarder } from "../../../packages/adapte
 import { CodexLocalRolloutReader } from "../../../packages/adapters/codex-desktop/src/codex-local-rollout-reader.js";
 import { CodexLocalSubmissionReader } from "../../../packages/adapters/codex-desktop/src/codex-local-submission-reader.js";
 import { CodexDesktopDriver } from "../../../packages/adapters/codex-desktop/src/codex-desktop-driver.js";
+import {
+  CODEX_DESKTOP_ATTACH_ONLY,
+  resolveCodexDesktopMode
+} from "../../../packages/adapters/codex-desktop/src/desktop-mode.js";
 import { BridgeSessionStatus } from "../../../packages/domain/src/session.js";
+import { hashIdentifierForLog } from "../../../packages/domain/src/log-redaction.js";
 import type { TurnEvent } from "../../../packages/domain/src/message.js";
 import { BridgeOrchestrator } from "../../../packages/orchestrator/src/bridge-orchestrator.js";
 import { buildCodexInboundText } from "../../../packages/orchestrator/src/media-context.js";
@@ -29,7 +34,9 @@ import type { ChatEgressPort } from "../../../packages/ports/src/chat.js";
 import type { DriverBinding } from "../../../packages/domain/src/driver.js";
 import { SqliteTranscriptStore } from "../../../packages/store/src/message-repo.js";
 import { SqliteSessionStore } from "../../../packages/store/src/session-repo.js";
+import { SqliteCompletionRepository } from "../../../packages/store/src/completion-repo.js";
 import { createSqliteDatabase } from "../../../packages/store/src/sqlite.js";
+import { DesktopCompletionMonitor } from "../../../packages/orchestrator/src/desktop-completion-monitor.js";
 import { loadConfigFromEnv } from "./config.js";
 import { ChatgptDesktopProvider } from "../../../packages/adapters/chatgpt-desktop/src/bridge-provider.js";
 import type { ChatgptDesktopDriver } from "../../../packages/adapters/chatgpt-desktop/src/driver.js";
@@ -63,8 +70,11 @@ export function bootstrap() {
   const db = createSqliteDatabase(config.databasePath);
   const sessionStore = new SqliteSessionStore(db);
   const transcriptStore = new SqliteTranscriptStore(db);
+  const completionRepository = new SqliteCompletionRepository(db);
   const runtimeDir = path.dirname(config.databasePath);
-  const useDomTransport = process.env.CODEX_DESKTOP_TRANSPORT === "dom";
+  const useDomTransport =
+    resolveCodexDesktopMode() === CODEX_DESKTOP_ATTACH_ONLY ||
+    process.env.CODEX_DESKTOP_TRANSPORT === "dom";
   const forwardAppServerUiEvents = process.env.CODEX_APP_SERVER_FORWARD_UI_EVENTS === "1";
   const cdpSession = new CdpSession({
     appName: config.codexDesktop.appName,
@@ -169,6 +179,19 @@ export function bootstrap() {
             includeSkillContext: shouldIncludeSkillContext
           })
         });
+        const submittedCompletionState = await legacyDomDriver.readCompletionPoll().catch(() => null);
+        if (submittedCompletionState?.active?.isTopLevel) {
+          const createdAt = new Date();
+          completionRepository.recordTurnOrigin({
+            correlationId: message.messageId,
+            threadId: submittedCompletionState.active.threadId,
+            baselineResponseId: submittedCompletionState.active.responseId,
+            baselineResponseHash: submittedCompletionState.active.responseHash,
+            origin: "qq",
+            createdAt: createdAt.toISOString(),
+            expiresAt: new Date(createdAt.getTime() + 2 * 60 * 60 * 1_000).toISOString()
+          });
+        }
         const stableBinding = await resolveStableBinding(adapters.codexDesktop, binding);
         if (session?.codexThreadRef !== stableBinding.codexThreadRef) {
           await sessionStore.updateBinding(message.sessionKey, stableBinding.codexThreadRef);
@@ -281,12 +304,21 @@ export function bootstrap() {
       weixinAdapters.map((entry) => [entry.accountKey, entry.adapter])
     )
   };
+  const completionMonitor = new DesktopCompletionMonitor(
+    legacyDomDriver,
+    completionRepository,
+    Object.fromEntries(
+      qqAdapters.map((entry) => [entry.accountKey, entry.adapter.egress])
+    )
+  );
 
   return {
     config,
     db,
     sessionStore,
     transcriptStore,
+    completionRepository,
+    completionMonitor,
     adapters: allAdapters,
     orchestrator: channelOrchestrators.qq,
     orchestrators: channelOrchestrators,
@@ -328,7 +360,7 @@ async function postTurnEvent(port: number, event: TurnEvent): Promise<void> {
   } catch (error) {
     console.warn("[qq-codex-bridge] turn event callback failed", {
       turnId: event.turnId,
-      sessionKey: event.sessionKey,
+      sessionKeyHash: hashIdentifierForLog(event.sessionKey),
       error: error instanceof Error ? error.message : String(error)
     });
   }

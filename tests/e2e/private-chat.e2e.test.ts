@@ -10,6 +10,7 @@ describe("bootstrap integration", () => {
     process.env.QQBOT_CLIENT_SECRET = "secret";
     process.env.QQ_CODEX_DATABASE_PATH = ":memory:";
     process.env.CODEX_REMOTE_DEBUGGING_PORT = "9229";
+    process.env.CODEX_DESKTOP_MODE = "managed-app-server";
 
     const app = bootstrap();
     try {
@@ -573,6 +574,7 @@ describe("bootstrap integration", () => {
       await Promise.all([turnA, turnB]);
     } finally {
       app.db.close();
+      delete process.env.CODEX_DESKTOP_MODE;
     }
   });
 

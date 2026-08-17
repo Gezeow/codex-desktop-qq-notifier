@@ -4,6 +4,9 @@ dist
 coverage
 runtime
 artifacts
+packaging/windows/stage
+packaging/windows/output
+packaging/windows/.cache
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

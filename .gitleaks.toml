@@ -1,0 +1,13 @@
+title = "qq-codex-bridge secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic API-key-shaped values in upstream unit-test fixtures"
+paths = [
+  '''tests/unit/mcp-push-server\.test\.ts''',
+  '''tests/unit/push-api-routes\.test\.ts''',
+  '''tests/unit/bridge-config\.test\.ts'''
+]
+

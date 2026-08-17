@@ -137,4 +137,89 @@ describe("internal turn event server", () => {
     expect(response.statusCode).toBe(202);
     expect(payloads).toEqual([{ route: "weixin", payload: { text: "hello" } }]);
   });
+
+  it("serves health only to loopback GET callers and reports unhealthy status", async () => {
+    const health = {
+      ok: false,
+      qqGateway: {
+        connected: false,
+        authenticated: false,
+        accounts: {
+          "qqbot:main": { connected: false, authenticated: false }
+        }
+      }
+    };
+    const getHealth = vi.fn().mockReturnValue(health);
+    const server = createBridgeHttpServer([
+      {
+        routePath: "/health",
+        getHealth
+      }
+    ]);
+    servers.push(server);
+
+    const localResponse = await new Promise<{ statusCode: number; body: string }>((resolve) => {
+      server.emit(
+        "request",
+        {
+          method: "GET",
+          url: "/health",
+          socket: { remoteAddress: "127.0.0.1" },
+          [Symbol.asyncIterator]: async function* () {}
+        } as never,
+        {
+          statusCode: 200,
+          end: function (body?: string) {
+            resolve({ statusCode: this.statusCode, body: body ?? "" });
+          }
+        }
+      );
+    });
+
+    expect(localResponse.statusCode).toBe(503);
+    expect(JSON.parse(localResponse.body)).toEqual(health);
+    expect(getHealth).toHaveBeenCalledTimes(1);
+
+    const remoteResponse = await new Promise<{ statusCode: number; body: string }>((resolve) => {
+      server.emit(
+        "request",
+        {
+          method: "GET",
+          url: "/health",
+          socket: { remoteAddress: "10.0.0.8" },
+          [Symbol.asyncIterator]: async function* () {}
+        } as never,
+        {
+          statusCode: 200,
+          end: function (body?: string) {
+            resolve({ statusCode: this.statusCode, body: body ?? "" });
+          }
+        }
+      );
+    });
+
+    expect(remoteResponse).toEqual({ statusCode: 403, body: "forbidden" });
+    expect(getHealth).toHaveBeenCalledTimes(1);
+
+    const postResponse = await new Promise<{ statusCode: number; body: string }>((resolve) => {
+      server.emit(
+        "request",
+        {
+          method: "POST",
+          url: "/health",
+          socket: { remoteAddress: "127.0.0.1" },
+          [Symbol.asyncIterator]: async function* () {}
+        } as never,
+        {
+          statusCode: 200,
+          end: function (body?: string) {
+            resolve({ statusCode: this.statusCode, body: body ?? "" });
+          }
+        }
+      );
+    });
+
+    expect(postResponse).toEqual({ statusCode: 405, body: "method not allowed" });
+    expect(getHealth).toHaveBeenCalledTimes(1);
+  });
 });

@@ -6,31 +6,96 @@ on:
       - main
       - "codex/**"
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
         with:
-          version: 10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+          version: 11.19.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 22.22.0
           cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check
+      - run: pnpm test
+      - run: pnpm run build
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile=false
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Type check
-        run: pnpm run check
-
-      - name: Run tests
-        run: pnpm test
+  windows-artifact:
+    name: Windows x64 release artifact
+    needs: [test, secret-scan]
+    runs-on: windows-latest
+    env:
+      RELEASE_VERSION: 0.2.0-ci.${{ github.run_number }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build and verify staged runtime
+        shell: powershell
+        run: .\packaging\windows\build-stage.ps1
+      - name: Fetch and verify Inno Setup 7.1.0 x64
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $download = Join-Path $env:RUNNER_TEMP 'inno-download'
+          $install = Join-Path $env:RUNNER_TEMP 'inno-install'
+          New-Item -ItemType Directory -Path $download,$install | Out-Null
+          gh release download is-7_1_0 --repo jrsoftware/issrc --pattern innosetup-7.1.0-x64.exe --dir $download
+          $asset = Join-Path $download 'innosetup-7.1.0-x64.exe'
+          gh release verify-asset $asset --repo jrsoftware/issrc
+          $signature = Get-AuthenticodeSignature -LiteralPath $asset
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Pyrsys B.V.') {
+            throw 'Inno Setup Authenticode verification failed.'
+          }
+          & $asset /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER "/DIR=$install"
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
+          "ISCC_PATH=$(Join-Path $install 'ISCC.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Compile and verify installer
+        shell: powershell
+        run: .\packaging\windows\build-installer.ps1 -Version $env:RELEASE_VERSION -IsccPath $env:ISCC_PATH
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qq-codex-completion-notifier-windows-x64
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            packaging/windows/output/*.exe
+            packaging/windows/output/*.sha256
+            packaging/windows/output/release-manifest.json
+            packaging/windows/stage/SBOM.cdx.json
+            packaging/windows/stage/THIRD_PARTY_NOTICES.md

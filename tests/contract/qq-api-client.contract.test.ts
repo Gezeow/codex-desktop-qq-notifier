@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { MediaArtifactKind } from "../../packages/domain/src/message.js";
-import { QqApiClient } from "../../packages/adapters/qq/src/qq-api-client.js";
+import { QqApiClient, QqApiError } from "../../packages/adapters/qq/src/qq-api-client.js";
 
 describe("qq api client", () => {
   it("fetches and caches the app access token", async () => {
@@ -64,7 +64,7 @@ describe("qq api client", () => {
     );
   });
 
-  it("sends c2c replies with qq passive plain text fields by default", async () => {
+  it("sends explicit c2c replies with qq passive plain text fields by default", async () => {
     const fetchFn = vi
       .fn()
       .mockResolvedValueOnce(
@@ -87,7 +87,13 @@ describe("qq api client", () => {
       apiBaseUrl: "https://api.sgroup.qq.com"
     });
 
-    await expect(client.sendC2CMessage("OPENID123", "hello", "qq-inbound-1")).resolves.toBe("qq-msg-1");
+    await expect(
+      client.sendC2CReply({
+        openid: "OPENID123",
+        content: "hello",
+        inboundMsgId: "qq-inbound-1"
+      })
+    ).resolves.toBe("qq-msg-1");
     expect(fetchFn).toHaveBeenNthCalledWith(
       2,
       "https://api.sgroup.qq.com/v2/users/OPENID123/messages",
@@ -127,7 +133,13 @@ describe("qq api client", () => {
       markdownSupport: true
     });
 
-    await expect(client.sendC2CMessage("OPENID123", "hello", "qq-inbound-2")).resolves.toBe("qq-msg-2");
+    await expect(
+      client.sendC2CReply({
+        openid: "OPENID123",
+        content: "hello",
+        inboundMsgId: "qq-inbound-2"
+      })
+    ).resolves.toBe("qq-msg-2");
     expect(fetchFn).toHaveBeenNthCalledWith(
       2,
       "https://api.sgroup.qq.com/v2/users/OPENID123/messages",
@@ -168,7 +180,10 @@ describe("qq api client", () => {
     });
 
     await expect(
-      client.sendC2CMessage("OPENID123", "```js\nconst x = 1;\n```", "qq-inbound-2b", {
+      client.sendC2CReply({
+        openid: "OPENID123",
+        content: "```js\nconst x = 1;\n```",
+        inboundMsgId: "qq-inbound-2b",
         preferMarkdown: true
       })
     ).resolves.toBe("qq-msg-3");
@@ -186,6 +201,86 @@ describe("qq api client", () => {
         })
       })
     );
+  });
+
+  it("serializes proactive C2C text without an own msg_id property", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "token-1", expires_in: "3600" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: "qq-proactive-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      );
+
+    const client = new QqApiClient("app-id", "secret", {
+      fetchFn,
+      now: () => 1_000,
+      authBaseUrl: "https://bots.qq.com",
+      apiBaseUrl: "https://api.sgroup.qq.com"
+    });
+
+    await expect(
+      client.sendC2CProactive({
+        openid: "OPENID123",
+        content: "completion text",
+        // Extra stale fields can arrive from persisted JavaScript data; the
+        // proactive API must not copy either one into the request body.
+        ...( {
+          replyToMessageId: "stale-inbound-id",
+          draftId: "stale-draft-id"
+        } as Record<string, unknown>)
+      } as never)
+    ).resolves.toBe("qq-proactive-1");
+
+    const requestBody = JSON.parse(String(fetchFn.mock.calls[1]?.[1]?.body)) as Record<string, unknown>;
+    expect(Object.hasOwn(requestBody, "msg_id")).toBe(false);
+    expect(requestBody).toEqual({
+      content: "completion text",
+      msg_type: 0,
+      msg_seq: 1
+    });
+  });
+
+  it("exposes structured QQ errors without echoing response secrets", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "token-1", expires_in: "3600" }), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          code: 40034024,
+          message: "msg_id=stale-inbound-id secret-token"
+        }), {
+          status: 400,
+          headers: { "content-type": "application/json" }
+        })
+      );
+
+    const client = new QqApiClient("app-id", "secret", {
+      fetchFn,
+      now: () => 1_000,
+      authBaseUrl: "https://bots.qq.com",
+      apiBaseUrl: "https://api.sgroup.qq.com"
+    });
+
+    const result = client.sendC2CProactive({ openid: "OPENID123", content: "hello" });
+    await expect(result).rejects.toBeInstanceOf(QqApiError);
+    await expect(result).rejects.toMatchObject({
+      httpStatus: 400,
+      businessCode: 40034024
+    });
+    await expect(result).rejects.not.toThrow(/stale-inbound-id|secret-token/);
   });
 
   it("uploads and sends a c2c media artifact through qq media endpoints", async () => {

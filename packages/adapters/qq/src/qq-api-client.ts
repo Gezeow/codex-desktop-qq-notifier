@@ -3,7 +3,7 @@ import { MediaArtifactKind, type MediaArtifact } from "../../../domain/src/messa
 
 type FetchLike = typeof fetch;
 
-type QqApiClientOptions = {
+export type QqApiClientOptions = {
   authBaseUrl?: string;
   apiBaseUrl?: string;
   fetchFn?: FetchLike;
@@ -11,9 +11,52 @@ type QqApiClientOptions = {
   markdownSupport?: boolean;
 };
 
-type SendMessageOptions = {
+export type SendMessageOptions = {
   preferMarkdown?: boolean;
 };
+
+export type C2CTextReplyRequest = SendMessageOptions & {
+  openid: string;
+  inboundMsgId: string;
+  content: string;
+};
+
+export type C2CTextProactiveRequest = SendMessageOptions & {
+  openid: string;
+  content: string;
+};
+
+export type C2CTextRequest =
+  | ({ mode: "reply" } & C2CTextReplyRequest)
+  | ({ mode: "proactive" } & C2CTextProactiveRequest);
+
+export type QqApiErrorOptions = {
+  httpStatus: number;
+  businessCode?: string | number;
+  retryAfterMs?: number;
+};
+
+/**
+ * A QQ HTTP response that was rejected by the API.
+ *
+ * The error intentionally contains only protocol metadata.  QQ response
+ * bodies can echo request values, so they are not copied into `message` or
+ * exposed as an error property.
+ */
+export class QqApiError extends Error {
+  readonly httpStatus: number;
+  readonly businessCode?: string | number;
+  readonly retryAfterMs?: number;
+
+  constructor(message: string, options: QqApiErrorOptions) {
+    super(message);
+    this.name = "QqApiError";
+    this.httpStatus = options.httpStatus;
+    this.businessCode = options.businessCode;
+    this.retryAfterMs = options.retryAfterMs;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
 
 type CachedToken = {
   value: string;
@@ -58,7 +101,7 @@ export class QqApiClient {
     });
 
     if (!response.ok) {
-      throw new Error(`QQ auth failed: ${response.status}`);
+      throw await this.toApiError(response, "auth");
     }
 
     const payload = (await response.json()) as {
@@ -100,7 +143,7 @@ export class QqApiClient {
     });
 
     if (!response.ok) {
-      throw new Error(`QQ gateway discovery failed: ${response.status}`);
+      throw await this.toApiError(response, "gateway discovery");
     }
 
     const payload = (await response.json()) as { url?: string };
@@ -111,13 +154,46 @@ export class QqApiClient {
     return payload.url;
   }
 
+  async sendC2CReply(request: C2CTextReplyRequest): Promise<string | null> {
+    assertNonEmpty(request.openid, "openid");
+    assertNonEmpty(request.inboundMsgId, "inboundMsgId");
+
+    return this.sendMessage(`/v2/users/${encodeURIComponent(request.openid)}/messages`, {
+      mode: "reply",
+      content: request.content,
+      inboundMsgId: request.inboundMsgId,
+      preferMarkdown: request.preferMarkdown,
+      sequenceKey: request.inboundMsgId
+    });
+  }
+
+  async sendC2CProactive(request: C2CTextProactiveRequest): Promise<string | null> {
+    assertNonEmpty(request.openid, "openid");
+
+    return this.sendMessage(`/v2/users/${encodeURIComponent(request.openid)}/messages`, {
+      mode: "proactive",
+      content: request.content,
+      preferMarkdown: request.preferMarkdown,
+      sequenceKey: `proactive:${request.openid}`
+    });
+  }
+
+  /**
+   * Backwards-compatible strict reply alias.  It deliberately requires a
+   * message id and never infers a proactive send from an omitted argument.
+   */
   async sendC2CMessage(
     userOpenId: string,
     content: string,
-    msgId: string,
+    inboundMsgId: string,
     options: SendMessageOptions = {}
   ): Promise<string | null> {
-    return this.sendMessage(`/v2/users/${encodeURIComponent(userOpenId)}/messages`, content, msgId, options);
+    return this.sendC2CReply({
+      openid: userOpenId,
+      content,
+      inboundMsgId,
+      ...options
+    });
   }
 
   async sendGroupMessage(
@@ -126,7 +202,16 @@ export class QqApiClient {
     msgId: string,
     options: SendMessageOptions = {}
   ): Promise<string | null> {
-    return this.sendMessage(`/v2/groups/${encodeURIComponent(groupOpenId)}/messages`, content, msgId, options);
+    assertNonEmpty(groupOpenId, "groupOpenId");
+    assertNonEmpty(msgId, "msgId");
+
+    return this.sendMessage(`/v2/groups/${encodeURIComponent(groupOpenId)}/messages`, {
+      mode: "reply",
+      content,
+      inboundMsgId: msgId,
+      preferMarkdown: options.preferMarkdown,
+      sequenceKey: msgId
+    });
   }
 
   async sendC2CMediaArtifact(
@@ -149,9 +234,7 @@ export class QqApiClient {
 
   private async sendMessage(
     path: string,
-    content: string,
-    msgId: string,
-    options: SendMessageOptions = {}
+    request: MessageRequest
   ): Promise<string | null> {
     const accessToken = await this.getAccessToken();
     const response = await this.fetchFn(`${this.apiBaseUrl}${path}`, {
@@ -161,12 +244,11 @@ export class QqApiClient {
         "content-type": "application/json",
         "X-Union-Appid": this.appId
       },
-      body: JSON.stringify(this.buildMessageBody(content, msgId, options))
+      body: JSON.stringify(this.buildMessageBody(request))
     });
 
     if (!response.ok) {
-      const responseText = await response.text().catch(() => "");
-      throw new Error(`QQ message send failed: ${response.status}${responseText ? ` ${responseText}` : ""}`);
+      throw await this.toApiError(response, "message send");
     }
 
     const payload = (await response.json()) as { id?: string };
@@ -198,8 +280,7 @@ export class QqApiClient {
     });
 
     if (!uploadResponse.ok) {
-      const responseText = await uploadResponse.text().catch(() => "");
-      throw new Error(`QQ media upload failed: ${uploadResponse.status}${responseText ? ` ${responseText}` : ""}`);
+      throw await this.toApiError(uploadResponse, "media upload");
     }
 
     const uploadPayload = (await uploadResponse.json()) as { file_info?: string };
@@ -224,8 +305,7 @@ export class QqApiClient {
     });
 
     if (!response.ok) {
-      const responseText = await response.text().catch(() => "");
-      throw new Error(`QQ media message send failed: ${response.status}${responseText ? ` ${responseText}` : ""}`);
+      throw await this.toApiError(response, "media message send");
     }
 
     const payload = (await response.json()) as { id?: string };
@@ -239,28 +319,45 @@ export class QqApiClient {
   }
 
   private buildMessageBody(
-    content: string,
-    msgId: string,
-    options: SendMessageOptions = {}
+    request: MessageRequest
   ): Record<string, unknown> {
-    const msgSeq = this.nextMsgSeq(msgId);
-    const useMarkdown = this.markdownSupport || options.preferMarkdown === true;
+    const msgSeq = this.nextMsgSeq(request.sequenceKey);
+    const useMarkdown = this.markdownSupport || request.preferMarkdown === true;
 
-    if (useMarkdown) {
-      return {
-        markdown: { content },
-        msg_type: 2,
-        msg_seq: msgSeq,
-        msg_id: msgId
-      };
+    const body: Record<string, unknown> = useMarkdown
+      ? {
+          markdown: { content: request.content },
+          msg_type: 2,
+          msg_seq: msgSeq
+        }
+      : {
+          content: request.content,
+          msg_type: 0,
+          msg_seq: msgSeq
+        };
+
+    if (request.mode === "reply") {
+      body.msg_id = request.inboundMsgId;
     }
 
-    return {
-      content,
-      msg_type: 0,
-      msg_seq: msgSeq,
-      msg_id: msgId
-    };
+    return body;
+  }
+
+  private async toApiError(response: Response, operation: string): Promise<QqApiError> {
+    const responseText = await response.text().catch(() => "");
+    const payload = parseJsonRecord(responseText);
+    const businessCode = readBusinessCode(payload);
+    const retryAfterMs = readRetryAfterMs(response, payload, this.now());
+    const businessSuffix = businessCode === undefined ? "" : ` (businessCode=${String(businessCode)})`;
+
+    return new QqApiError(
+      `QQ ${operation} failed: HTTP ${response.status}${businessSuffix}`,
+      {
+        httpStatus: response.status,
+        ...(businessCode === undefined ? {} : { businessCode }),
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs })
+      }
+    );
   }
 
   private async buildMediaUploadBody(artifact: MediaArtifact): Promise<Record<string, unknown>> {
@@ -284,6 +381,10 @@ export class QqApiClient {
     throw new Error(`QQ media source not found: ${artifact.localPath}`);
   }
 
+  /*
+   * The remaining media helpers intentionally stay reply-only.  A proactive
+   * completion is text-only and is routed through sendC2CProactive above.
+   */
   private getFileSizeLimitBytes(kind: MediaArtifactKind): number {
     switch (kind) {
       case MediaArtifactKind.Image:
@@ -330,4 +431,120 @@ export class QqApiClient {
         return 4;
     }
   }
+}
+
+type MessageRequest =
+  | {
+      mode: "reply";
+      content: string;
+      inboundMsgId: string;
+      preferMarkdown?: boolean;
+      sequenceKey: string;
+    }
+  | {
+      mode: "proactive";
+      content: string;
+      preferMarkdown?: boolean;
+      sequenceKey: string;
+    };
+
+function assertNonEmpty(value: string, fieldName: string): void {
+  if (!value.trim()) {
+    throw new TypeError(`QQ ${fieldName} must be a non-empty string`);
+  }
+}
+
+function parseJsonRecord(text: string): Record<string, unknown> | null {
+  if (!text) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readBusinessCode(payload: Record<string, unknown> | null): string | number | undefined {
+  if (!payload) {
+    return undefined;
+  }
+
+  for (const candidate of [payload, payload.data, payload.error]) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+    for (const key of ["businessCode", "business_code", "err_code", "errorCode", "error_code", "code"]) {
+      const value = candidate[key];
+      if (typeof value === "string" && value.trim()) {
+        return value;
+      }
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return value;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function readRetryAfterMs(
+  response: Response,
+  payload: Record<string, unknown> | null,
+  nowMs: number
+): number | undefined {
+  const headerValue = response.headers.get("retry-after");
+  const headerRetryAfterMs = parseRetryAfterHeader(headerValue, nowMs);
+  if (headerRetryAfterMs !== undefined) {
+    return headerRetryAfterMs;
+  }
+
+  for (const candidate of [payload, payload?.data, payload?.error]) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+
+    const milliseconds = candidate.retryAfterMs ?? candidate.retry_after_ms;
+    const parsedMilliseconds = parseFiniteNonNegativeNumber(milliseconds);
+    if (parsedMilliseconds !== undefined) {
+      return parsedMilliseconds;
+    }
+
+    const seconds = candidate.retryAfter ?? candidate.retry_after;
+    const parsedSeconds = parseFiniteNonNegativeNumber(seconds);
+    if (parsedSeconds !== undefined) {
+      return parsedSeconds * 1_000;
+    }
+  }
+
+  return undefined;
+}
+
+function parseRetryAfterHeader(value: string | null, nowMs: number): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const seconds = Number(value.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1_000;
+  }
+
+  const timestamp = Date.parse(value);
+  if (Number.isFinite(timestamp)) {
+    return Math.max(0, timestamp - nowMs);
+  }
+
+  return undefined;
+}
+
+function parseFiniteNonNegativeNumber(value: unknown): number | undefined {
+  const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(number) && number >= 0 ? number : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

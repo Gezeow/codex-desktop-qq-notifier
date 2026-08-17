@@ -350,7 +350,8 @@ describe("thread command handler", () => {
 
     expect(qqEgress.deliver).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: expect.stringContaining("| 查看 Codex 最近线程 | `/threads` | `/t` |")
+        text: expect.stringContaining("| 查看 Codex 最近线程 | `/threads` | `/t` |"),
+        replyToMessageId: "msg-1"
       })
     );
     expect(qqEgress.deliver).toHaveBeenCalledWith(

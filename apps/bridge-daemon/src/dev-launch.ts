@@ -22,6 +22,7 @@ type SpawnLike = (
 type DevLaunchDeps = {
   fetchFn?: FetchLike;
   launchApp?: LaunchAppFn;
+  platform?: NodeJS.Platform;
   sleep?: (ms: number) => Promise<void>;
 };
 
@@ -47,6 +48,14 @@ export async function ensureCodexDesktopForDev(
 
   if (await isCdpReachable(config.remoteDebuggingPort, fetchFn)) {
     return { launched: false };
+  }
+
+  const platform = deps.platform ?? process.platform;
+  if (platform === "win32") {
+    throw new Error(
+      `Codex desktop CDP endpoint is unavailable on 127.0.0.1:${config.remoteDebuggingPort}; ` +
+      "automatic Windows launch is disabled"
+    );
   }
 
   await launchApp(config.appName, config.remoteDebuggingPort);
@@ -120,14 +129,14 @@ export function resolveDarwinAppExecutablePath(
 ): string {
   const searchRoots = deps.searchRoots ?? [
     "/Applications",
-    path.join(process.env.HOME ?? "", "Applications")
+    path.posix.join(process.env.HOME ?? "", "Applications")
   ];
   const existsSyncFn = deps.existsSyncFn ?? fs.existsSync;
   const appNames = Array.from(new Set([appName, "Codex"]));
 
   for (const searchRoot of searchRoots) {
     for (const candidateName of appNames) {
-      const candidate = path.join(
+      const candidate = path.posix.join(
         searchRoot,
         `${candidateName}.app`,
         "Contents",
@@ -140,5 +149,5 @@ export function resolveDarwinAppExecutablePath(
     }
   }
 
-  return path.join("/Applications", `${appName}.app`, "Contents", "MacOS", appName);
+  return path.posix.join("/Applications", `${appName}.app`, "Contents", "MacOS", appName);
 }
