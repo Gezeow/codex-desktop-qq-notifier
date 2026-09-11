@@ -97,16 +97,21 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 
 ## Project path governance
 
-- `PROJECT_ROOT` is `D:\AI\qq-codex-bridge-public`. Controlled development,
-  test, fixture, cache, staging, build, diagnostic, generated-evidence, and
-  intermediate files stay under this root by default.
+- `PROJECT_ROOT` is the actual root of the current repository checkout or
+  worktree, as resolved by `git rev-parse --show-toplevel` from within it.
+  Controlled development, test, fixture, cache, staging, build, diagnostic,
+  generated-evidence, and intermediate files stay under this root by default.
 - If repository placement is demonstrably unsuitable because of path length,
-  required external topology, tested behavior, or worktree isolation, use only
-  `D:\AI\_project-artifacts\qq-codex-bridge-public\...` with unique per-run
-  paths.
-- Do not explicitly use `C:\`, `C:\temp`, Desktop, Downloads, user-profile
-  temp, loose `D:\AI`, or another project's artifact root for project
-  artifacts.
+  required external topology, tested behavior, or worktree isolation, use an
+  explicitly configured, project-exclusive artifact root with unique per-run
+  paths. Do not assume a particular drive, username, or checkout location.
+- Local examples only: `D:\AI\qq-codex-bridge-public` may be a Windows
+  checkout, and `D:\AI\_project-artifacts\qq-codex-bridge-public\...` may be
+  its configured fallback. These paths are not requirements for other clones
+  or CI runners.
+- Do not place controlled artifacts in filesystem roots, shared global or
+  user-profile temporary directories, Desktop, Downloads, loose parent
+  directories, or another project's artifact root.
 - Keep OS-managed application data and any approved production/runtime
   authority at their contractual locations; test copies must not be treated as
   production state.
