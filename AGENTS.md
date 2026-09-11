@@ -94,3 +94,19 @@ To check whether embeddings exist, inspect `.gitnexus/meta.json` — the `stats.
 - Generate docs: `npx gitnexus wiki`
 
 <!-- gitnexus:end -->
+
+## Project path governance
+
+- `PROJECT_ROOT` is `D:\AI\qq-codex-bridge-public`. Controlled development,
+  test, fixture, cache, staging, build, diagnostic, generated-evidence, and
+  intermediate files stay under this root by default.
+- If repository placement is demonstrably unsuitable because of path length,
+  required external topology, tested behavior, or worktree isolation, use only
+  `D:\AI\_project-artifacts\qq-codex-bridge-public\...` with unique per-run
+  paths.
+- Do not explicitly use `C:\`, `C:\temp`, Desktop, Downloads, user-profile
+  temp, loose `D:\AI`, or another project's artifact root for project
+  artifacts.
+- Keep OS-managed application data and any approved production/runtime
+  authority at their contractual locations; test copies must not be treated as
+  production state.

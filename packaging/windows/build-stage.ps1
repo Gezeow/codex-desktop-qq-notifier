@@ -62,8 +62,13 @@ finally {
     Pop-Location
 }
 
+$buildCacheRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '.cache\build-stage'))
+if (-not (Test-Path -LiteralPath $buildCacheRoot -PathType Container)) {
+    New-Item -ItemType Directory -Path $buildCacheRoot | Out-Null
+}
 if ([string]::IsNullOrWhiteSpace($NodeArchivePath)) {
-    $downloadRoot = Join-Path ([IO.Path]::GetTempPath()) ("qq-codex-node-" + [guid]::NewGuid().ToString('N'))
+    $downloadRoot = [IO.Path]::GetFullPath((Join-Path $buildCacheRoot ("download-" + [guid]::NewGuid().ToString('N'))))
+    Assert-ChildPath -Parent $buildCacheRoot -Child $downloadRoot
     New-Item -ItemType Directory -Path $downloadRoot | Out-Null
     $NodeArchivePath = Join-Path $downloadRoot $nodeArchiveName
     $checksumsPath = Join-Path $downloadRoot 'SHASUMS256.txt'
@@ -81,7 +86,8 @@ if ($actualArchiveHash -cne $nodeArchiveSha256) {
     throw "Node archive SHA-256 mismatch: $actualArchiveHash"
 }
 
-$extractRoot = Join-Path ([IO.Path]::GetTempPath()) ("qq-codex-node-extract-" + [guid]::NewGuid().ToString('N'))
+$extractRoot = [IO.Path]::GetFullPath((Join-Path $buildCacheRoot ("extract-" + [guid]::NewGuid().ToString('N'))))
+Assert-ChildPath -Parent $buildCacheRoot -Child $extractRoot
 Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot
 $nodeSource = Join-Path $extractRoot 'node-v22.22.0-win-x64'
 $nodeDestination = Join-Path $stagePath 'node'
